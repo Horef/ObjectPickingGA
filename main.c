@@ -11,6 +11,8 @@
 #define NUM_VARIATIONS 3 //number of possible states of a board square.
 #define NUM_MOVEMENTS 7
 
+#define NUM_BOARDS_FITNESS 3
+
 //These are important game parameters, and you may tweak them to get better results.
 //Keep in mind that making larger some of these numbers will take more time for the algorithm to compute.
 #define NUM_SIMULATIONS_AGENT 3 //Number of simulations each agent will run in order to determine its fitness.
@@ -50,11 +52,11 @@ struct agent {
 //Board structure
 struct board {
     int board_height;
-    int board_weight;
+    int board_width;
+    int num_objects;
 
     int ** matrix;
 };
-
 
 //Function declarations
 void initialize_states(int level, int state);
@@ -73,6 +75,16 @@ void print_agents(struct agent* agents, int size);
 void *calculate_fitness(void* arg);
 int encode_array_int(const int* arr, int len);
 void decode_int_array(int* arr, int len, int num);
+int find_state(int x_val, int y_val);
+
+void run_agent(struct agent *agent);
+int binary_state_search(int state);
+int evaluate_trait(struct agent *agent, int trait);
+
+int try_up(struct agent *agent);
+int try_right(struct agent *agent);
+int try_down(struct agent *agent);
+int try_left(struct agent *agent);
 
 //Global variables
 //Array of all possible states the agent can be in.
@@ -80,11 +92,18 @@ void decode_int_array(int* arr, int len, int num);
 //Columns go like this: UP, RIGHT, DOWN, LEFT, CURRENT. (States of these squares.)
 //Changed in the last version. This is now a vector such that the number in the column represents encoding of the states.
 int movements[NUM_POSSIBLE_STATES];
+int num_movements_per_board;
 
 struct agent* population;
 struct agent* new_population;
 struct board game_board;
 int main() {
+    //Constants for loops.
+    int i, j;
+
+    //Threads.
+    pthread_t pthread1, pthread2, pthread3, pthread4;
+
     //Variables for time measurements.
     clock_t start, end;
     double cpu_time_used;
@@ -97,23 +116,23 @@ int main() {
     printf("Initialization was done successfully.\n");
 
     //Getting the user to set all relevant variables to run the simulation.
-    int board_width;
-    int board_height;
     int population_size;
     double mutation_probability;
     int number_of_generations;
     int min_object_number;
     int max_object_number;
-    setup_game_properties(&board_width, &board_height, &population_size, &mutation_probability, &number_of_generations, &min_object_number, &max_object_number);
+    setup_game_properties(&game_board.board_width, &game_board.board_height, &population_size, &mutation_probability, &number_of_generations, &min_object_number, &max_object_number);
+
+    num_movements_per_board = game_board.board_width*game_board.board_height*2;
 
     //Setting up the board will relevant parameters.
     //----Measuring the time----
     start = clock();
     //--------
 
-    game_board.matrix = (int**) malloc(board_height*sizeof(int*));
-    for (int i=0; i < board_height; i++)
-        game_board.matrix[i] = (int*)malloc(board_width * sizeof(int));
+    game_board.matrix = (int**) malloc(game_board.board_height*sizeof(int*));
+    for (i=0; i < game_board.board_height; i++)
+        game_board.matrix[i] = (int*)malloc(game_board.board_width * sizeof(int));
     setup_board(min_object_number, max_object_number);
 
     //----Measuring the time----
@@ -123,6 +142,9 @@ int main() {
 
     printf("\nSetting up the game board took %lf seconds\n\n", cpu_time_used);
 
+
+
+
     //Generating the agents and running the algorithm.
 
     //----Measuring the time----
@@ -131,11 +153,10 @@ int main() {
 
     //Allocating enough memory for the desired amount of population.
     population = (struct agent*) malloc(population_size*sizeof(struct agent));
-    for (int i=0; i<population_size; i++) {
+    for (i=0; i<population_size; i++) {
         population[i].dna = (int*)malloc(NUM_POSSIBLE_STATES*sizeof(int));
     }
     //Dividing the process of setting the population to different threads.
-    pthread_t pthread1, pthread2;
     int pthread1_size = population_size/2;
     int pthread1_start = 0;
     int pthread1_arg[2] = {pthread1_start, pthread1_size};
@@ -160,15 +181,46 @@ int main() {
     //print_agents(population, population_size);
 
 
+
+
+    //----Measuring the time----
+    start = clock();
+    //--------
+
+    //-------Main loop-------
+    //Calculate fitness
+    for (i=0; i<NUM_SIMULATIONS_AGENT; i++) {
+        //Dividing the process of finding the fitness of the population to different threads.
+        pthread_create(&pthread1,NULL,calculate_fitness,&pthread1_arg);
+
+        pthread_create(&pthread2,NULL,calculate_fitness,&pthread2_arg);
+
+        //Wait for threads to finish.
+        pthread_join(pthread1,NULL);
+        pthread_join(pthread2,NULL);
+
+        setup_board(min_object_number, max_object_number);
+    }
+
+    //----Measuring the time----
+    end = clock();
+    cpu_time_used = ((double) (end-start))/CLOCKS_PER_SEC;
+    //--------
+
+    printf("\nEvaluating fitness of the population took %lf seconds\n\n", cpu_time_used);
+
+    print_agents(population, population_size);
+
+
     //------Freeing the Memory------
     //Freeing the memory from malloc usages.
-    for (int i=0;i<board_height;i++) {
+    for (i=0;i<game_board.board_height;i++) {
         free(game_board.matrix[i]);
     }
     free(game_board.matrix);
 
     //Freeing the dna variables.
-    for (int i=0;i<population_size;i++) {
+    for (i=0;i<population_size;i++) {
         free(population[i].dna);
     }
     //Freeing the population array.
@@ -182,36 +234,136 @@ void *calculate_fitness(void* arg) {
     int size = args[1];
 
     for (int i=start;i<start+size;i++) {
-        struct agent current_agent = population[i];
-
+        struct agent* current_agent = &population[i];
+        run_agent(current_agent);
+        (*current_agent).fitness+=(((double)(*current_agent).points)/(game_board.num_objects*10))/NUM_BOARDS_FITNESS;
     }
 }
 
-int run_agent(struct agent* agent, int ** board) {
+void run_agent(struct agent *agent) {
+    int state, dna_trait;
 
+    for (int i=0; i<num_movements_per_board; i++) {
+        state = find_state((*agent).x_place, (*agent).y_place);
+        dna_trait = binary_state_search(state);
+        (*agent).points += evaluate_trait(agent, dna_trait);
+    }
 }
 
-int find_state(int ** board, int board_width, int board_height, int x_val, int y_val) {
+int evaluate_trait(struct agent *agent, int trait) {
+    //TODO: clean this function
+    int collected_points = 0;
+
+    switch ((*agent).dna[trait]) {
+        case GO_UP:
+            collected_points += try_up(agent);
+            break;
+        case GO_RIGHT:
+            collected_points += try_right(agent);
+            break;
+        case GO_DOWN:
+            collected_points += try_down(agent);
+            break;
+        case GO_LEFT:
+            collected_points += try_left(agent);
+            break;
+        case GO_RANDOM:
+            switch (rand()%4) {
+                case 0:
+                    collected_points += try_up(agent);
+                    break;
+                case 1:
+                    collected_points += try_right(agent);
+                    break;
+                case 2:
+                    collected_points += try_down(agent);
+                    break;
+                case 3:
+                    collected_points += try_left(agent);
+                    break;
+            }
+            break;
+        case PICK_OBJECT:
+            if (game_board.matrix[(*agent).x_place][(*agent).y_place]==OBJECT) {
+                collected_points += 10;
+                game_board.matrix[(*agent).x_place][(*agent).y_place]=NOTHING;
+            } else
+                collected_points -= 1;
+            break;
+    }
+    return collected_points;
+}
+
+int try_up(struct agent *agent) {
+    if ((*agent).y_place-1>=0) {
+        (*agent).y_place -= 1;
+        return 0;
+    } else
+        return -5;
+}
+
+int try_right(struct agent *agent) {
+    if ((*agent).x_place+1<game_board.board_width) {
+        (*agent).x_place += 1;
+        return 0;
+    } else
+        return -5;
+}
+
+int try_down(struct agent *agent) {
+    if ((*agent).y_place+1<game_board.board_height) {
+        (*agent).y_place += 1;
+        return 0;
+    } else
+        return -5;
+}
+
+int try_left(struct agent *agent) {
+    if ((*agent).x_place-1>=0) {
+        (*agent).x_place -= 1;
+        return 0;
+    } else
+        return -5;
+}
+
+int binary_state_search(int state) {
+    int start=0, end=NUM_POSSIBLE_STATES-1, mid=(end-start)/2;
+
+    while (start<end) {
+        if (movements[mid]==state)
+            return mid;
+        if (movements[mid]<state) {
+            start=mid+1;
+            mid=(end+start)/2;
+        } else if (movements[mid]>state) {
+            end=mid-1;
+            mid=(end+start)/2;
+        }
+    }
+    return -1;
+}
+
+int find_state(int x_val, int y_val) {
     int state[NUM_VARIABLES];
 
     //state 0 is the state of the "up" square.
     if (y_val==0) state[0] = WALL;
-    else state[0] = board[x_val][y_val-1];
+    else state[0] = game_board.matrix[x_val][y_val-1];
 
     //state 1 is the state of the "right" square.
-    if (x_val==board_width-1) state[1] = WALL;
-    else state[1] = board[x_val+1][y_val];
+    if (x_val==game_board.board_width-1) state[1] = WALL;
+    else state[1] = game_board.matrix[x_val+1][y_val];
 
     //state 2 is the state of the "down" square.
-    if (y_val==board_height-1) state[2] = WALL;
-    else state[2] = board[x_val][y_val+1];
+    if (y_val==game_board.board_height-1) state[2] = WALL;
+    else state[2] = game_board.matrix[x_val][y_val+1];
 
     //state 3 is the state of the "left" square.
     if (x_val==0) state[3] = WALL;
-    else state[3] = board[x_val-1][y_val];
+    else state[3] = game_board.matrix[x_val-1][y_val];
 
     //state 4 is the state of the current square.
-    state[4] = board[x_val][y_val];
+    state[4] = game_board.matrix[x_val][y_val];
     return encode_array_int(state, NUM_VARIABLES);
 }
 
@@ -261,16 +413,17 @@ void generate_random_dna(int* dna) {
 int setup_board(int min_num_objects, int max_num_objects) {
     for (int i=0; i<game_board.board_height; i++) {
         int j=0;
-        for (; j<game_board.board_weight; j++) {
+        for (; j<game_board.board_width; j++) {
             game_board.matrix[i][j] = NOTHING;
         }
     }
 
     int num_objects = max_num_objects==min_num_objects ? max_num_objects : min_num_objects + (rand()%(max_num_objects-min_num_objects));
+    game_board.num_objects=num_objects;
     int row, col;
     for (int i=0; i<num_objects; i++) {
         row = rand()%game_board.board_height;
-        col = rand()%game_board.board_weight;
+        col = rand()%game_board.board_width;
         if (game_board.matrix[row][col] != NOTHING) i--;
         else game_board.matrix[row][col] = OBJECT;
     }
@@ -324,7 +477,7 @@ void setup_movements_int_state(int state) {
 
 void print_agents(struct agent* agents, int size) {
     for (int i=0; i<size; i++) {
-        printf("Agent %d: ", i);
+        printf("Agent %d with fitness %lf: ", i, agents[i].fitness);
         print_dna(agents[i].dna);
         printf("\n");
     }
@@ -340,18 +493,18 @@ void print_dna(int* dna) {
 }
 
 void print_board() {
-    print_line((2*game_board.board_weight)+2,'_');
+    print_line((2*game_board.board_width)+2,'_');
 
     for (int i=0; i<game_board.board_height; i++) {
         printf("|");
-        for (int j=0; j<game_board.board_weight; j++) {
+        for (int j=0; j<game_board.board_width; j++) {
             printf("%d",game_board.matrix[i][j]);
-            if (j!=game_board.board_weight-1) printf(",");
+            if (j!=game_board.board_width-1) printf(",");
         }
         printf("|\n");
     }
 
-    print_line((2*game_board.board_weight)+2, '_');
+    print_line((2*game_board.board_width)+2, '_');
 }
 
 void print_line(int size, char symbol) {
